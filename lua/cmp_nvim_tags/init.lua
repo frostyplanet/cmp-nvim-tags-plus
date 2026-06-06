@@ -1,17 +1,7 @@
-local cmp = require('cmp')
+local source = {}
 local util = require('vim.lsp.util')
 
-local source = {}
-local default_options = {
-  complete_defer = 100,
-  max_items = 10,
-  keyword_length = 3,
-  exact_match = false,
-  current_buffer_only = false,
-}
-local global_options = {}
-
-local function get_full_signature(tag)
+function source.get_full_signature(tag)
   if not tag.filename or not tag.cmd then return nil end
   local f = io.open(tag.filename, "r")
   if not f then return nil end
@@ -40,21 +30,9 @@ local function get_full_signature(tag)
   return found and table.concat(lines, "\n") or nil
 end
 
-local function buildDocumentation(word, bufname, prefix)
+function source.build_documentation(word, prefix)
   local document = {}
-
-  if global_options.exact_match then
-    word = '^' .. word .. '$'
-  end
-
-  local list_tags_ok
-  local tags
-
-  if bufname then
-    list_tags_ok, tags = pcall(vim.fn.taglist, word, bufname)
-  else
-    list_tags_ok, tags = pcall(vim.fn.taglist, word)
-  end
+  local list_tags_ok, tags = pcall(vim.fn.taglist, "^" .. word .. "$")
 
   if not list_tags_ok or type(tags) ~= "table" then
     return ""
@@ -72,15 +50,11 @@ local function buildDocumentation(word, bufname, prefix)
   end
 
   for i, tag in ipairs(tags) do
-    if global_options.max_items < i then
-      table.insert(document, ('...and %d more'):format(#tags - 10))
-      break
-    end
+    if i > 5 then break end
     local title = '# ' .. tag.filename .. ' [' .. tag.kind .. ']'
     local body = ""
     
-    -- 尝试获取完整签名
-    local full_sig = get_full_signature(tag)
+    local full_sig = source.get_full_signature(tag)
     if full_sig then
       body = "```rust\n" .. full_sig .. "\n```"
     elseif #tag.cmd >= 5 then
@@ -88,25 +62,22 @@ local function buildDocumentation(word, bufname, prefix)
     end
 
     local doc = title .. "\n" .. body
-
-    if tag.access ~= nil then
-      doc = doc .. '\n  ' .. tag.access
-    end
-    if tag.implementation ~= nil then
-      doc = doc .. '\n  impl: _' .. tag.implementation .. '_'
-    end
-    if tag.signature ~= nil then
-      doc = doc .. '\n  sign: _' .. tag.name .. tag.signature .. '_'
-    end
-    if tag.struct ~= nil then
-      doc = doc .. '\n  in ' .. tag.struct
-    end
+    if tag.implementation then doc = doc .. '\n  impl: _' .. tag.implementation .. '_' end
+    if tag.struct then doc = doc .. '\n  in ' .. tag.struct end
     table.insert(document, doc)
   end
 
-  local formartDocument = util.convert_input_to_markdown_lines(document)
-  return table.concat(formartDocument, '\n')
+  return document
 end
+
+local default_options = {
+  complete_defer = 100,
+  max_items = 10,
+  keyword_length = 3,
+  exact_match = false,
+  current_buffer_only = false,
+}
+local global_options = {}
 
 source.new = function()
   return setmetatable({}, { __index = source })
@@ -122,6 +93,7 @@ end
 
 function source:complete(request, callback)
   local items = {}
+  local cmp = require('cmp')
   global_options = vim.tbl_deep_extend('keep', request.option or {}, default_options)
   vim.defer_fn(function()
     local line = request.context.cursor_before_line
@@ -132,7 +104,6 @@ function source:complete(request, callback)
     end
 
     if string.len(input) >= global_options.keyword_length or (prefix and #input >= 0) then
-      local tags = {}
       if prefix then
         local ok, list = pcall(vim.fn.taglist, "^" .. input)
         if ok and type(list) == "table" then
@@ -172,12 +143,14 @@ function source:complete(request, callback)
 end
 
 function source:resolve(completion_item, callback)
-  local bufname = global_options.current_buffer_only and vim.api.nvim_buf_get_name(0)
-    or nil
+  local cmp = require('cmp')
   local prefix = completion_item.data and completion_item.data.prefix
+  local docs = source.build_documentation(completion_item.label, prefix)
+  local formartDocument = util.convert_input_to_markdown_lines(docs)
+  
   completion_item.documentation = {
     kind = cmp.lsp.MarkupKind.Markdown,
-    value = buildDocumentation(completion_item.label, bufname, prefix)
+    value = table.concat(formartDocument, '\n')
   }
 
   callback(completion_item)

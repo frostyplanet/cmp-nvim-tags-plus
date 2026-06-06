@@ -1,87 +1,86 @@
-# cmp-nvim-tags
+# cmp-nvim-tags-plus
 
-tags completion source for [nvim-cmp](https://github.com/hrsh7th/nvim-cmp)
+README_en | [README_zh](README_zh.md)
+
+A powerful Neovim completion source for `nvim-cmp` that leverages `ctags` to provide LSP-like features without the heavy memory footprint. Ideal for Rust projects where `rust-analyzer` might be too resource-intensive.
+
+## Features
+
+- **Context-Aware Completion**: Intelligent filtering for Rust `Type::method` syntax using tag fields (implementation, struct, class).
+- **Dynamic Signature Extraction**: Automatically reads source files to provide full function signatures (including multi-line parameters) in the documentation window.
+- **Ghost-Text Signature Help**: Non-intrusive parameter hints displayed as virtual lines (virt_lines) directly below your cursor while typing.
+- **Safety Checks**: Smart detection to prevent triggers in comments or strings.
+- **Fast and Lightweight**: Pure Lua implementation with minimal overhead.
+
+## Installation
+
+Using [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 ```lua
--- Installation
-use { 
-  'hrsh7th/nvim-cmp',
-  requires = {
-    {
-      'quangnguyen30192/cmp-nvim-tags',
-      -- if you want the sources is available for some file types
-      ft = {
-        'kotlin',
-        'java'
-      }
-    }
+{
+  "hrsh7th/nvim-cmp",
+  dependencies = {
+    "frostyplanet/cmp-nvim-tags-plus",
   },
-  config = function ()
-    require'cmp'.setup {
-    sources = {
-      {
-        name = 'tags',
-        option = {
-          -- this is the default options, change them if you want.
-          -- Delayed time after user input, in milliseconds.
-          complete_defer = 100,
-          -- Max items when searching `taglist`.
-          max_items = 10,
-          -- The number of characters that need to be typed to trigger
-          -- auto-completion.
-          keyword_length = 3,
-          -- Use exact word match when searching `taglist`, for better searching
-          -- performance.
-          exact_match = false,
-          -- Prioritize searching result for current buffer.
-          current_buffer_only = false,
+  config = function()
+    require("cmp_nvim_tags_plus").setup({
+        signature_help = {
+            enabled = true,
+            virt_lines = true,
+            manual_key = "<leader>k",  -- bind the key to call document hint explicitly (when cursor on function name). Press twice it will disappear
+        }
+    })
+    local cmp = require("cmp")
+    cmp.setup({
+        sources = {
+            { name = "tags" },
         },
-      },
-      -- more sources
-    }
-  }
-  end
+    })
+  end,
 }
-
 ```
 
-# Troubleshooting
-
-If you are using `cmp-nvim-lsp` with `cmp-nvim-tags`, you may face a weird error
-`method workspace/symbol is not supported by any of the servers registered for the current buffer`.
-
-This is because neovim will register `tagfunc` as `vim.lsp.tagfunc` when lsp is attached, and there's no attached lsps
-supports `workspace/symbol` method. To prevent this behavior, add the following code in your config file:
-
-Besides, `vim.lsp.tagfunc` may also have performance issue since it is calling
-the lsp `workspace/symbol` method firstly and fallback to the default when the
-former one returns no result.
-
-If you feel that use `cmp-nvim-tags` is laggy, then you can consider to set `tagfunc` to nil.
+## Default Configuration
 
 ```lua
-on_attach = function(bufnr, client)
-    vim.bo.tagfunc = nil
-end
-
--- sqls is an example lsp that does not support workspace/symbol
--- change sqls to the lsp where the error happens
-require('lspconfig').sqls.setup {
-    on_attach = on_attach
-}
-
-
--- Occasionally, due to potential execution order issues: you might set tagfunc
--- to nil, but the LSP could re-register it later. So that you may need a
--- "brute force way" to ask neovim will always fallback to the default tag
--- search method immediately.
-TAGFUNC_ALWAYS_EMPTY = function()
-    return vim.NIL
-end
-
--- if tagfunc is already registered, nvim lsp will not try to set tagfunc as vim.lsp.tagfunc.
-vim.o.tagfunc = "v:lua.TAGFUNC_ALWAYS_EMPTY"
+require('cmp_nvim_tags_plus').setup({
+  max_items = 10,
+  keyword_length = 3,
+  signature_help = {
+    enabled = true,            -- Enable signature help
+    virt_lines = true,         -- true: show below line; false: show at EOL
+    trigger_on_bracket = true, -- Auto trigger on '('
+    manual_key = nil,          -- no default keymap
+  }
+})
 ```
 
-# Credit
-[Compe source for tags](https://github.com/hrsh7th/nvim-compe/blob/master/lua/compe_tags/init.lua)
+## How it Works
+
+- **Trigger**: Triggered by typing `(`. It continuously updates as you move the cursor in Insert mode using `CursorMovedI`.
+- **Dismiss**: Automatically disappears when you type the closing `)` or leave Insert mode.
+- **Accuracy**: Uses regex to ensure signatures are only shown when you are inside an unclosed function call.
+
+### My recommend config for rust
+
+To ensure your completion source is always up-to-date, add this to your configuration:
+
+```lua
+local function update_tags()
+  local ft = vim.bo.filetype
+  if ft == "rust" then
+    vim.fn.jobstart("rusty-tags vi -O tags")
+  else
+    vim.fn.jobstart("ctags -R .")
+  end
+end
+
+vim.api.nvim_create_autocmd("BufWritePost", {
+  pattern = { "*.rs", "*.c", "*.cpp", "*.go" },
+  callback = update_tags,
+})
+```
+
+## Credits
+
+Based on the original [cmp-nvim-tags](https://github.com/quangnguyen30192/cmp-nvim-tags) by quangnguyen30192.

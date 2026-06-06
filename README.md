@@ -27,9 +27,14 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
         signature_help = {
             enabled = true,
             virt_lines = true,
-            manual_key = "<leader>k",  -- bind the key to call document hint explicitly (when cursor on function name). Press twice it will disappear
         }
     })
+
+    -- Optionally, manually bind the signature toggle
+    vim.keymap.set({ "n", "i" }, "<leader>k", function()
+        require("cmp_nvim_tags_plus").toggle_signature()
+    end, { desc = "Toggle Tag Signature Help" })
+
     local cmp = require("cmp")
     cmp.setup({
         sources = {
@@ -50,7 +55,6 @@ require('cmp_nvim_tags_plus').setup({
     enabled = true,            -- Enable signature help
     virt_lines = true,         -- true: show below line; false: show at EOL
     trigger_on_bracket = true, -- Auto trigger on '('
-    manual_key = nil,          -- no default keymap
   }
 })
 ```
@@ -79,7 +83,6 @@ return {
             signature_help = {
                 enabled = true,
                 virt_lines = true,
-                manual_key = "<leader>k",
             }
         })
         local cmp = require("cmp")
@@ -122,6 +125,7 @@ return {
                 ["<CR>"] = cmp.mapping.confirm({ select = true }),
             }),
             sources = {
+                { name = "tags" },
                 {
                     name = "buffer",
                     option = {
@@ -131,7 +135,6 @@ return {
                         end
                     }
                 },
-                { name = "tags" },
             },
         })
 
@@ -170,26 +173,30 @@ lua/config/keymap.lua
 
 ```lua
 -- ctag generate
-local function update_tags()
+local function update_tags(silent)
     local ft = vim.bo.filetype
     if ft == "rust" then
-        print("rusty-tags indexing started...")
         vim.fn.jobstart("rusty-tags vi -O tags", {
             on_exit = function(_, code)
                 if code == 0 then
-                    print("Rust tags updated!")
+                    if not silent then
+                        print("Rust tags updated")
+                    end
                 else
-                    print("Rust tags failed, check RUST_SRC_PATH")
+                    print("Rust tags failed!")
                 end
             end
         })
     else
         local cmd = "ctags --exclude='*.vim' --exclude='build' --exclude='venv' --exclude='target' -R ."
-        print("Tags indexing started...")
         vim.fn.jobstart(cmd, {
             on_exit = function(_, code)
                 if code == 0 then
-                    print("Tags updated!")
+                    if not silent then
+                        print("Tags updated")
+                    end
+                else
+                    print("Tags update failed!")
                 end
             end
         })
@@ -199,13 +206,19 @@ end
 -- Manual trigger
 vim.keymap.set("n", "<F2>", update_tags, { desc = "Update ctags" })
 
+-- Toggle Tag Signature Help
+vim.keymap.set({ "n", "i" }, "<leader>k", function()
+    require("cmp_nvim_tags_plus").toggle_signature()
+end, { desc = "Toggle Tag Signature Help" })
+
 -- Auto-update tags on save
 vim.api.nvim_create_autocmd("BufWritePost", {
     pattern = { "*.rs", "*.c", "*.cpp", "*.h", "*.go" },
     callback = function()
-        update_tags()
+        update_tags(true)
     end,
 })
+
 ```
 
 ## Credits

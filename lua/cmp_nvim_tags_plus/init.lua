@@ -9,12 +9,20 @@ M.config = {
     enabled = true,
     virt_lines = true,
     trigger_on_bracket = true, -- Automatically trigger on '('
-    manual_key = nil,          -- Key to manually trigger (e.g., "<leader>k")
   }
 }
 
 --- Internal state to prevent multiple setups
 local setup_done = false
+
+function M.toggle_signature()
+  local extmarks = vim.api.nvim_buf_get_extmarks(0, ns_id, 0, -1, {})
+  if #extmarks > 0 then
+    M.close_signature()
+  else
+    M.show_signature()
+  end
+end
 
 --- Setup function to configure the plugin and optional keybindings
 function M.setup(opts)
@@ -36,18 +44,6 @@ function M.setup(opts)
       group = group,
       callback = function() M.close_signature() end,
     })
-
-    -- Manual Keybinding (Supports both Normal and Insert mode)
-    if M.config.signature_help.manual_key then
-      vim.keymap.set({ "n", "i" }, M.config.signature_help.manual_key, function()
-        local extmarks = vim.api.nvim_buf_get_extmarks(0, ns_id, 0, -1, {})
-        if #extmarks > 0 then
-          M.close_signature()
-        else
-          M.show_signature()
-        end
-      end, { desc = "Toggle Tag Signature Help" })
-    end
 
     -- Automatic bracket trigger
     if M.config.signature_help.trigger_on_bracket then

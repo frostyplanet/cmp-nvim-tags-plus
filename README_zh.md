@@ -1,4 +1,4 @@
-[README_en](README.md) | README_zh
+[README_en](README.md) | README 中文
 
 # cmp-nvim-tags-plus
 
@@ -59,27 +59,160 @@ require('cmp_nvim_tags_plus').setup({
 - **消失**: 当键入闭合的 `)` 或退出插入模式时自动消失。
 - **精准度**: 使用正则表达式确保仅在未闭合的函数调用内部显示签名，且自动避开注释和字符串。
 
-## 使用建议
+## 我的推荐配置
 
-### 保存时自动更新 Tags (推荐)
+lua/plugins/nvim-cmp.lua
+
+```lua
+return {
+    "hrsh7th/nvim-cmp",
+    dependencies = {
+        "hrsh7th/cmp-buffer",
+        "hrsh7th/cmp-path",
+        "hrsh7th/cmp-cmdline",
+        "frostyplanet/cmp-nvim-tags-plus",
+    },
+    config = function()
+        require("cmp_nvim_tags_plus").setup({
+            signature_help = {
+                enabled = true,
+                virt_lines = true,
+                manual_key = "<leader>k",
+            }
+        })
+        local cmp = require("cmp")
+         -- 光标前是否有有效字符检测
+        local has_words_before = function()
+            local cursor = vim.api.nvim_win_get_cursor(0)
+            local line, col = cursor[1], cursor[2]
+            if col == 0 then return false end
+            local lines = vim.api.nvim_buf_get_lines(0, line - 1, line, true)
+            if not lines or #lines == 0 then return false end
+            -- 获取光标左侧紧贴着的那个字符
+            local char_before = lines[1]:sub(col, col)
+            -- 如果它不是空白字符（空格、制表符等），则返回 true
+            return char_before:match("%s") == nil
+        end
+        cmp.setup({
+            window = {
+                completion = cmp.config.window.bordered(),
+                documentation = cmp.config.window.bordered(),
+            },
+            formatting = {
+                format = function(entry, vim_item)
+                    vim_item.menu = ({
+                        buffer = "[Buf]",
+                        tags = "[Tag]",
+                    })[entry.source.name]
+                    return vim_item
+                end,
+            },
+            mapping = cmp.mapping.preset.insert({
+                ["<Down>"] = cmp.mapping.select_next_item(),
+                ["<Up>"] = cmp.mapping.select_prev_item(),
+                ["<Tab>"] = cmp.mapping(function(fallback)
+                    if cmp.visible() then
+                        -- 如果窗口已经弹出了，Tab 自动高亮选中/移动到下一个
+                        -- 使用 Select 行为确保它能立刻在视觉上高亮第一项
+                        cmp.select_next_item({ behavior = cmp.SelectBehavior.Select })
+                    elseif has_words_before() then
+                        -- 如果窗口没开（比如你按 Esc 关掉了），但前面有单词，Tab 键可以手动强制唤起
+                        cmp.complete()
+                    else
+                        -- 如果前面是空格、行首或缩进，直接执行原生的 Tab 缩进
+                        fallback()
+                    end
+                end, { "i", "s" }),
+                ["<CR>"] = cmp.mapping.confirm({ select = true }), -- 回车确认
+                --["<Esc>"] = cmp.mapping.abort(), -- Esc 退出（绝对不会卡死）
+            }),
+            sources = {
+                {
+                    name = "buffer",
+                    option = {
+                        get_bufnrs = function()
+                            -- 返回所有缓冲区列表, 而不是仅仅当前 buffer
+                            return vim.api.nvim_list_bufs()
+                        end
+                    }
+                },
+                { name = "tags" },
+            },
+        })
+
+    cmp.setup.cmdline(':', {
+        mapping = cmp.mapping.preset.cmdline({
+            -- nvim-cmp 不能支持 up/down 的定制，所以我们使用左右来代替
+            ['<Right>'] = cmp.mapping(function(fallback)
+                if cmp.visible() then
+                    cmp.select_next_item({ behavior = cmp.SelectBehavior.Select })
+                else
+                    fallback()
+                end
+            end, { "c" }),
+            ['<Left>'] = cmp.mapping(function(fallback)
+                if cmp.visible() then
+                    cmp.select_prev_item({ behavior = cmp.SelectBehavior.Select })
+                else
+                    fallback()
+                end
+            end, { "c" }),
+        }),
+        sources = cmp.config.sources({
+            { name = 'path', option = { trailing_slash = true } },
+        }, {
+            { name = 'cmdline' },
+        }),
+    })
+    end
+}
+
+```
 
 为了确保补全源始终是最新的，建议添加以下配置：
 
+lua/config/keymap.lua
+
 ```lua
+-- ctag generate
 local function update_tags()
-  local ft = vim.bo.filetype
-  if ft == "rust" then
-    vim.fn.jobstart("rusty-tags vi -O tags")
-  else
-    vim.fn.jobstart("ctags -R .")
-  end
+    local ft = vim.bo.filetype
+    if ft == "rust" then
+        print("rusty-tags indexing started...")
+        vim.fn.jobstart("rusty-tags vi -O tags", {
+            on_exit = function(_, code)
+                if code == 0 then
+                    print("Rust tags updated!")
+                else
+                    print("Rust tags failed, check RUST_SRC_PATH")
+                end
+            end
+        })
+    else
+        local cmd = "ctags --exclude='*.vim' --exclude='build' --exclude='venv' --exclude='target' -R ."
+        print("Tags indexing started...")
+        vim.fn.jobstart(cmd, {
+            on_exit = function(_, code)
+                if code == 0 then
+                    print("Tags updated!")
+                end
+            end
+        })
+    end
 end
 
+-- Manual trigger
+vim.keymap.set("n", "<F2>", update_tags, { desc = "Update ctags" })
+
+-- Auto-update tags on save
 vim.api.nvim_create_autocmd("BufWritePost", {
-  pattern = { "*.rs", "*.c", "*.cpp", "*.go" },
-  callback = update_tags,
+    pattern = { "*.rs", "*.c", "*.cpp", "*.h", "*.go" },
+    callback = function()
+        update_tags()
+    end,
 })
 ```
+
 
 ## 致谢
 

@@ -100,17 +100,30 @@ function M.get_full_signature(tag)
   return found and table.concat(lines, "\n") or nil
 end
 
+local function get_node_at_cursor_built_in()
+  local ok, node = pcall(function()
+    if vim.treesitter.get_node then
+      return vim.treesitter.get_node()
+    end
+    local parser_ok, parser = pcall(vim.treesitter.get_parser, 0)
+    if not parser_ok or not parser then return nil end
+    local tree = parser:parse()[1]
+    if not tree then return nil end
+    local cursor = vim.api.nvim_win_get_cursor(0)
+    local row, col = cursor[1] - 1, cursor[2]
+    return tree:root():descendant_for_range(row, col, row, col)
+  end)
+  return ok and node or nil
+end
+
 --- Enhanced check for comments or strings using both synstack and Treesitter
 local function is_in_comment_or_string()
   -- 1. Try Treesitter (Modern approach)
-  local ts_available, ts_utils = pcall(require, 'nvim-treesitter.ts_utils')
-  if ts_available then
-    local node = ts_utils.get_node_at_cursor()
-    if node then
-      local type = node:type():lower()
-      if type:find("comment") or type:find("string") then
-        return true
-      end
+  local node = get_node_at_cursor_built_in()
+  if node then
+    local type = node:type():lower()
+    if type:find("comment") or type:find("string") then
+      return true
     end
   end
 
@@ -181,6 +194,224 @@ function M.close_signature()
   vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
 end
 
+local function get_node_text(node)
+  if not node then return "" end
+  if vim.treesitter.get_node_text then
+    return vim.treesitter.get_node_text(node, 0)
+  else
+    return vim.treesitter.query.get_node_text(node, 0)
+  end
+end
+
+local function clean_type_name(type_name)
+  if not type_name then return nil end
+  local cleaned = type_name:gsub("^&%s*mut%s*", ""):gsub("^&%s*", ""):gsub("^%*%s*const%s*", ""):gsub("^%*%s*mut%s*", "")
+  cleaned = cleaned:gsub("^const%s+", ""):gsub("%s*%*$", ""):gsub("%s*&$", "")
+  cleaned = cleaned:gsub("^%s*", ""):gsub("%s*$", "")
+  return cleaned
+end
+
+local function unwrap_value_node(node)
+  while node do
+    local t = node:type()
+    if t == "reference_expression" or t == "unary_expression" or t == "parenthesized_expression" then
+      node = node:child_by_field_name("value") or node:child(1) or node:child(0)
+    else
+      break
+    end
+  end
+  return node
+end
+
+--- Resolve context prefix (Self, local variable, or parameter) using Treesitter
+local function resolve_context(var_name)
+  if not var_name then return nil end
+  if var_name == "Self" then
+    local node = get_node_at_cursor_built_in()
+    if not node then return "Self" end
+    while node do
+      if node:type() == "impl_item" then
+        for child in node:iter_children() do
+          if child:type() == "type_identifier" or child:type() == "generic_type" then
+            print("get local type from impl")
+            return clean_type_name(get_node_text(child))
+          end
+        end
+        break
+      end
+      node = node:parent()
+    end
+    return "Self"
+  end
+
+  -- Try to resolve variable type in the current buffer
+  local current_node = get_node_at_cursor_built_in()
+  if not current_node then
+      print("no node at cursor")
+      return var_name
+  end
+
+  print("using treesitter")
+
+  -- Walk up to find the scope (function or block)
+  local scope = current_node
+  while scope and scope:type() ~= "function_item" and scope:type() ~= "block" do
+    scope = scope:parent()
+  end
+  if not scope then return var_name end
+
+  -- Heuristic: Search for declarations within this scope or its parents
+  local search_node = scope
+  while search_node do
+    for child in search_node:iter_children() do
+        if not child then
+            print("child is nil")
+            break
+        end
+      -- Match 'let var: Type'
+      if child:type() == "let_declaration" then
+        local pattern_node = child:child_by_field_name("pattern")
+        if pattern_node and get_node_text(pattern_node) == var_name then
+          local type_node = child:child_by_field_name("type")
+          if type_node then
+            return clean_type_name(get_node_text(type_node))
+          end
+
+          -- Match c) 'let var = Cls::new()' or 'let var = Cls'
+          local value_node = child:child_by_field_name("value")
+          if not value_node then
+            local found_eq = false
+            for c in child:iter_children() do
+              if found_eq then
+                if c:type() ~= "=" and c:type() ~= ";" then
+                  value_node = c
+                  break
+                end
+              elseif c:type() == "=" then
+                found_eq = true
+              end
+            end
+          end
+
+          value_node = unwrap_value_node(value_node)
+
+          if value_node then
+            local val_text = get_node_text(value_node)
+            local val_type = value_node:type()
+
+            if val_type == "call_expression" then
+              local func_node = value_node:child_by_field_name("function") or value_node:child(0)
+              if func_node then
+                local func_text = get_node_text(func_node)
+                local cls = func_text:match("([%a_][%w_]*)::[%a_][%w_]*") or func_text:match("^([%a_][%w_]*)::")
+                if cls then return clean_type_name(cls) end
+              end
+            end
+
+            local cls = val_text:match("([%a_][%w_]*)::[%a_][%w_]*") or val_text:match("^([%a_][%w_]*)$")
+            if cls then return clean_type_name(cls) end
+          end
+        end
+      end
+      -- Match function parameters 'fn foo(var: Type)'
+      if child:type() == "parameters" then
+        for param in child:iter_children() do
+          if param:type() == "parameter" then
+            local pattern_node = param:child_by_field_name("pattern")
+            if pattern_node and get_node_text(pattern_node) == var_name then
+              local type_node = param:child_by_field_name("type")
+              if type_node then return clean_type_name(get_node_text(type_node)) end
+            end
+          end
+        end
+      end
+    end
+    search_node = search_node:parent()
+  end
+
+  return var_name
+end
+
+local function get_call_info_treesitter()
+  local node = get_node_at_cursor_built_in()
+  if not node then return nil end
+
+  local call_node = nil
+  local curr = node
+  while curr do
+    local t = curr:type()
+    if t == "call_expression" or t == "method_call_expression" then
+      call_node = curr
+      break
+    end
+    curr = curr:parent()
+  end
+
+  if not call_node then return nil end
+
+  local func_node = call_node:child_by_field_name("function") or call_node:child(0)
+  if not func_node then return nil end
+
+  local call_text = get_node_text(func_node)
+  if not call_text or #call_text == 0 then return nil end
+
+  call_text = call_text:gsub("%s+", "")
+
+  -- 1. Static call: containing "::"
+  if call_text:find("::") then
+    local prefix, func = call_text:match("([%a_][%w_]*)::([%a_][%w_]*)$")
+    if func then
+      return prefix, func, false
+    end
+  end
+
+  -- 2. Method call: containing "." or "->"
+  if call_text:find("%.") or call_text:find("%->") then
+    local prefix, func = call_text:match("([%a_][%w_]*)%.([%a_][%w_]*)$")
+    if not func then
+      prefix, func = call_text:match("([%a_][%w_]*)%->([%a_][%w_]*)$")
+    end
+    if func then
+      return prefix, func, true
+    end
+  end
+
+  -- 3. Direct call
+  local func = call_text:match("^([%a_][%w_]*)$")
+  if func then
+    return nil, func, false
+  end
+
+  return nil
+end
+
+local function get_node_info_for_completion_treesitter()
+  local node = get_node_at_cursor_built_in()
+  if not node then return nil end
+
+  local curr = node
+  while curr do
+    local t = curr:type()
+    if t == "field_expression" then
+      local val_node = curr:child_by_field_name("value")
+      local field_node = curr:child_by_field_name("field")
+      if val_node and field_node then
+        return get_node_text(val_node), get_node_text(field_node), true
+      end
+    elseif t == "scoped_identifier" or t == "path_expression" then
+      local text = get_node_text(curr)
+      if text:find("::") then
+        local prefix, input = text:match("([%a_][%w_]*)::([%w_]*)$")
+        if prefix then
+          return prefix, input, false
+        end
+      end
+    end
+    curr = curr:parent()
+  end
+  return nil
+end
+
 function M.show_signature()
   if not M.config.signature_help.enabled then return end
   if is_in_comment_or_string() then
@@ -210,20 +441,31 @@ function M.show_signature()
   end
 
   local prefix, func, is_method
-  prefix, func = line_to_cursor:match("([%a_][%w_]*)::([%a_][%w_]*)%s*%([^)]*$")
-  is_method = false
-  if not func then
-    prefix, func = line_to_cursor:match("([%a_][%w_]*)%.([%a_][%w_]*)%s*%([^)]*$")
-    is_method = true
-  end
-  if not func then
-    func = line_to_cursor:match("([%a_][%w_]*)%s*%([^)]*$")
+  local ts_ok, ts_prefix, ts_func, ts_is_method = pcall(get_call_info_treesitter)
+  if ts_ok and ts_func then
+    prefix, func, is_method = ts_prefix, ts_func, ts_is_method
+  else
+    prefix, func = line_to_cursor:match("([%a_][%w_]*)::([%a_][%w_]*)%s*%([^)]*$")
     is_method = false
+    if not func then
+      prefix, func = line_to_cursor:match("([%a_][%w_]*)%.([%a_][%w_]*)%s*%([^)]*$")
+      is_method = true
+    end
+    if not func then
+      func = line_to_cursor:match("([%a_][%w_]*)%s*%([^)]*$")
+      is_method = false
+    end
   end
+  print("is_method", is_method, prefix, func)
 
   if not func then
     M.close_signature()
     return
+  end
+
+  if is_method and prefix then
+    prefix = resolve_context(prefix)
+    print("resolve_context", prefix)
   end
 
   local docs_table = M.build_documentation(func, prefix)
@@ -282,19 +524,29 @@ function M:complete(request, callback)
   local line = request.context.cursor_before_line
   local prefix, input, is_method
 
-  -- Fallback to regex
-  -- 1. Static/Assoc: Type::func
-  prefix, input = line:match("([%a_][%w_]*)::([%w_]*)$")
-  is_method = false
-  -- 2. Method: obj.func
-  if not prefix then
-    prefix, input = line:match("([%a_][%w_]*)%.([%w_]*)$")
-    is_method = true
-  end
-  -- 3. Fallback
-  if not prefix then
-    input = string.sub(line, request.offset)
+  -- Try treesitter first
+  local ts_ok, ts_prefix, ts_input, ts_is_method = pcall(get_node_info_for_completion_treesitter)
+  if ts_ok and ts_prefix then
+    prefix, input, is_method = ts_prefix, ts_input, ts_is_method
+  else
+    -- Fallback to regex
+    -- 1. Static/Assoc: Type::func
+    prefix, input = line:match("([%a_][%w_]*)::([%w_]*)$")
     is_method = false
+    -- 2. Method: obj.func
+    if not prefix then
+      prefix, input = line:match("([%a_][%w_]*)%.([%w_]*)$")
+      is_method = true
+    end
+    -- 3. Fallback
+    if not prefix then
+      input = string.sub(line, request.offset)
+      is_method = false
+    end
+  end
+
+  if is_method and prefix then
+    prefix = resolve_context(prefix)
   end
 
   if string.len(input) >= M.config.keyword_length or (prefix and #input >= 0) then

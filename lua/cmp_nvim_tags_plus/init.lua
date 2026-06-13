@@ -8,7 +8,7 @@ M.config = {
   signature_help = {
     enabled = true,
     virt_lines = true,
-    trigger_on_bracket = true, -- Automatically trigger on '('
+    trigger_character = "(", -- Default trigger character, set to nil to disable auto trigger
   }
 }
 
@@ -58,9 +58,10 @@ function M.setup(opts)
     })
 
     -- Automatic bracket trigger
-    if M.config.signature_help.trigger_on_bracket then
-      vim.keymap.set("i", "(", function()
-        vim.api.nvim_feedkeys("(", "n", true)
+    local trigger_char = M.config.signature_help.trigger_character
+    if trigger_char then
+      vim.keymap.set("i", trigger_char, function()
+        vim.api.nvim_feedkeys(trigger_char, "n", true)
         if M.timer then
           M.timer:stop()
           M.timer:start(50, 0, vim.schedule_wrap(function()
@@ -132,21 +133,33 @@ end
 function M.build_documentation(word, prefix)
   local document = {}
   local list_tags_ok, tags = pcall(vim.fn.taglist, "^" .. word .. "$")
-  if not list_tags_ok or type(tags) ~= "table" then return "" end
+  if not list_tags_ok or type(tags) ~= "table" then return {} end
 
-  if prefix then
-    local filtered = {}
-    for _, t in ipairs(tags) do
-      if t.implementation == prefix or t.struct == prefix or t.class == prefix or t.enum == prefix then
-        table.insert(filtered, t)
-      end
+  local current_file = vim.api.nvim_buf_get_name(0)
+
+  -- Priority rules:
+  -- 1. Matches prefix (implementation/struct/class/enum)
+  -- 2. Belongs to the current buffer
+  table.sort(tags, function(a, b)
+    local a_match_prefix = prefix and (a.implementation == prefix or a.struct == prefix or a.class == prefix or a.enum == prefix)
+    local b_match_prefix = prefix and (b.implementation == prefix or b.struct == prefix or b.class == prefix or b.enum == prefix)
+
+    if a_match_prefix ~= b_match_prefix then
+      return a_match_prefix
     end
-    if #filtered > 0 then tags = filtered end
-  end
+
+    local a_is_current = a.filename == current_file
+    local b_is_current = b.filename == current_file
+    if a_is_current ~= b_is_current then
+      return a_is_current
+    end
+    return false
+  end)
 
   for i, tag in ipairs(tags) do
     if i > M.config.max_items then break end
-    local title = '# ' .. tag.filename .. ' [' .. tag.kind .. ']'
+    local filename = vim.fn.fnamemodify(tag.filename, ":t")
+    local title = '# ' .. filename .. ' [' .. tag.kind .. ']'
     local body = ""
     local full_sig = M.get_full_signature(tag)
     if full_sig then
@@ -186,11 +199,26 @@ function M.show_signature()
     return
   end
 
-  -- Logic for finding function call context:
-  -- We look for the most recent unclosed parenthesis.
-  local prefix, func = line_to_cursor:match("([%a_][%w_]*)::([%a_][%w_]*)%s*%([^)]*$")
+  -- Fast fail if trigger character is enabled but not present in line before cursor
+  local trigger_char = M.config.signature_help.trigger_character
+  if trigger_char then
+    local escaped_trigger = trigger_char:gsub("([^%w])", "%%%1")
+    if not line_to_cursor:find(escaped_trigger) then
+      M.close_signature()
+      return
+    end
+  end
+
+  local prefix, func, is_method
+  prefix, func = line_to_cursor:match("([%a_][%w_]*)::([%a_][%w_]*)%s*%([^)]*$")
+  is_method = false
+  if not func then
+    prefix, func = line_to_cursor:match("([%a_][%w_]*)%.([%a_][%w_]*)%s*%([^)]*$")
+    is_method = true
+  end
   if not func then
     func = line_to_cursor:match("([%a_][%w_]*)%s*%([^)]*$")
+    is_method = false
   end
 
   if not func then
@@ -206,26 +234,35 @@ function M.show_signature()
 
   local first_doc = docs_table[1]
   local signature = first_doc:match("```rust\n(.-)\n```") or first_doc:match("__(.-)__")
+  local source_file = first_doc:match("# ([^%s]+)")
+
   if not signature then
     M.close_signature()
     return
   end
 
+  -- Clean up signature: take first line or sensible part
   signature = signature:gsub("\n", " "):gsub("%s+", " "):gsub("^%s*", "")
   local param_part = signature:match("(%(.*)$")
   if param_part then signature = param_part end
 
   M.close_signature()
   local indent = line:match("^%s*") or ""
+  local display_text = ""
+  if source_file then
+    display_text = "  (" .. source_file .. ") => " .. signature
+  else
+    display_text = "  => " .. signature
+  end
 
   if M.config.signature_help.virt_lines then
     vim.api.nvim_buf_set_extmark(0, ns_id, row, 0, {
-      virt_lines = {{ { indent .. "  => " .. signature, "Comment" } }},
+      virt_lines = {{ { indent .. display_text, "Comment" } }},
       virt_lines_above = false,
     })
   else
     vim.api.nvim_buf_set_extmark(0, ns_id, row, 0, {
-      virt_text = {{ "  => " .. signature, "Comment" }},
+      virt_text = {{ display_text, "Comment" }},
       virt_text_pos = 'eol',
     })
   end
@@ -243,23 +280,79 @@ function M:complete(request, callback)
   if not cmp_ok then return callback({ items = {}, isIncomplete = false }) end
 
   local line = request.context.cursor_before_line
-  local prefix, input = line:match("([%a_][%w_]*)::([%w_]*)$")
-  if not prefix then input = string.sub(line, request.offset) end
+  local prefix, input, is_method
+
+  -- Fallback to regex
+  -- 1. Static/Assoc: Type::func
+  prefix, input = line:match("([%a_][%w_]*)::([%w_]*)$")
+  is_method = false
+  -- 2. Method: obj.func
+  if not prefix then
+    prefix, input = line:match("([%a_][%w_]*)%.([%w_]*)$")
+    is_method = true
+  end
+  -- 3. Fallback
+  if not prefix then
+    input = string.sub(line, request.offset)
+    is_method = false
+  end
 
   if string.len(input) >= M.config.keyword_length or (prefix and #input >= 0) then
     if prefix then
       local ok, list = pcall(vim.fn.taglist, "^" .. input)
       if ok and type(list) == "table" then
         local seen = {}
+        local current_file = vim.api.nvim_buf_get_name(0)
+
+        -- Check if there are any tags matching prefix type
+        local has_any_match = false
         for _, t in ipairs(list) do
           if t.implementation == prefix or t.struct == prefix or t.class == prefix or t.enum == prefix then
+            has_any_match = true
+            break
+          end
+        end
+
+        if has_any_match then
+          -- Normal mode: strict filtering by prefix type
+          for _, t in ipairs(list) do
+            if t.implementation == prefix or t.struct == prefix or t.class == prefix or t.enum == prefix then
+              if not seen[t.name] then
+                table.insert(items, {
+                  label = t.name,
+                  kind = cmp.lsp.CompletionItemKind.Method,
+                })
+                seen[t.name] = true
+              end
+            end
+          end
+        else
+          -- Fallback mode: no type matches prefix. Priority to current buffer tags.
+          local matched_items = {}
+          for _, t in ipairs(list) do
             if not seen[t.name] then
-              table.insert(items, {
-                label = t.name,
-                kind = cmp.lsp.CompletionItemKind.Method,
+              local is_current = (t.filename == current_file)
+              table.insert(matched_items, {
+                tag = t,
+                is_current = is_current
               })
               seen[t.name] = true
             end
+          end
+
+          table.sort(matched_items, function(a, b)
+            if a.is_current ~= b.is_current then
+              return a.is_current
+            end
+            return false
+          end)
+
+          for _, item in ipairs(matched_items) do
+            table.insert(items, {
+              label = item.tag.name,
+              kind = cmp.lsp.CompletionItemKind.Method,
+              sortText = string.format("%04d_%s", item.is_current and 1 or 2, item.tag.name),
+            })
           end
         end
       end

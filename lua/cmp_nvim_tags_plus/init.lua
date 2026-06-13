@@ -12,8 +12,9 @@ M.config = {
   }
 }
 
---- Internal state to prevent multiple setups
+--- Internal state
 local setup_done = false
+M.timer = nil
 
 function M.toggle_signature()
   local extmarks = vim.api.nvim_buf_get_extmarks(0, ns_id, 0, -1, {})
@@ -32,24 +33,40 @@ function M.setup(opts)
 
   if M.config.signature_help.enabled then
     local group = vim.api.nvim_create_augroup("CmpNvimTagsPlus", { clear = true })
+    M.timer = vim.loop.new_timer()
 
-    -- Auto-update on cursor move in insert mode
+    -- Auto-update on cursor move in insert mode with debounce
     vim.api.nvim_create_autocmd("CursorMovedI", {
       group = group,
-      callback = function() M.show_signature() end,
+      callback = function()
+        if M.timer then
+          M.timer:stop()
+          M.timer:start(100, 0, vim.schedule_wrap(function()
+            M.show_signature()
+          end))
+        end
+      end,
     })
 
     -- Auto-cleanup on leave
     vim.api.nvim_create_autocmd({ "InsertLeave", "BufLeave" }, {
       group = group,
-      callback = function() M.close_signature() end,
+      callback = function()
+        if M.timer then M.timer:stop() end
+        M.close_signature()
+      end,
     })
 
     -- Automatic bracket trigger
     if M.config.signature_help.trigger_on_bracket then
       vim.keymap.set("i", "(", function()
         vim.api.nvim_feedkeys("(", "n", true)
-        vim.schedule(function() M.show_signature() end)
+        if M.timer then
+          M.timer:stop()
+          M.timer:start(50, 0, vim.schedule_wrap(function()
+            M.show_signature()
+          end))
+        end
       end, { desc = "Auto Tag Signature Help" })
     end
   end
@@ -163,19 +180,17 @@ function M.show_signature()
   local row, col = cursor[1] - 1, cursor[2]
   local line_to_cursor = line:sub(1, col)
 
+  -- Fast fail if line ends with space or is empty
+  if line_to_cursor:match("%s$") or #line_to_cursor == 0 then
+    M.close_signature()
+    return
+  end
+
   -- Logic for finding function call context:
   -- We look for the most recent unclosed parenthesis.
   local prefix, func = line_to_cursor:match("([%a_][%w_]*)::([%a_][%w_]*)%s*%([^)]*$")
   if not func then
     func = line_to_cursor:match("([%a_][%w_]*)%s*%([^)]*$")
-  end
-
-  -- Fallback for Normal Mode: if cursor is ON a parenthesis or just after it
-  if not func and vim.api.nvim_get_mode().mode == 'n' then
-    local line_after = line:sub(col + 1)
-    -- Try to match if cursor is on/before '('
-    prefix, func = line:match("([%a_][%w_]*)::([%a_][%w_]*)%s*%(")
-    if not func then func = line:match("([%a_][%w_]*)%s*%(") end
   end
 
   if not func then
@@ -227,53 +242,35 @@ function M:complete(request, callback)
   local cmp_ok, cmp = pcall(require, 'cmp')
   if not cmp_ok then return callback({ items = {}, isIncomplete = false }) end
 
-  vim.defer_fn(function()
-    local line = request.context.cursor_before_line
-    local prefix, input = line:match("([%a_][%w_]*)::([%w_]*)$")
-    if not prefix then input = string.sub(line, request.offset) end
+  local line = request.context.cursor_before_line
+  local prefix, input = line:match("([%a_][%w_]*)::([%w_]*)$")
+  if not prefix then input = string.sub(line, request.offset) end
 
-    if string.len(input) >= M.config.keyword_length or (prefix and #input >= 0) then
-      if prefix then
-        local ok, list = pcall(vim.fn.taglist, "^" .. input)
-        if ok and type(list) == "table" then
-          local seen = {}
-          for _, t in ipairs(list) do
-            if t.implementation == prefix or t.struct == prefix or t.class == prefix or t.enum == prefix then
-              if not seen[t.name] then
-                table.insert(items, {
-                  label = t.name,
-                  kind = cmp.lsp.CompletionItemKind.Method,
-                  detail = prefix,
-                  data = { prefix = prefix }
-                })
-                seen[t.name] = true
-              end
+  if string.len(input) >= M.config.keyword_length or (prefix and #input >= 0) then
+    if prefix then
+      local ok, list = pcall(vim.fn.taglist, "^" .. input)
+      if ok and type(list) == "table" then
+        local seen = {}
+        for _, t in ipairs(list) do
+          if t.implementation == prefix or t.struct == prefix or t.class == prefix or t.enum == prefix then
+            if not seen[t.name] then
+              table.insert(items, {
+                label = t.name,
+                kind = cmp.lsp.CompletionItemKind.Method,
+              })
+              seen[t.name] = true
             end
           end
         end
-      else
-        local _, list = pcall(function() return vim.fn.getcompletion(input, "tag") end)
-        for _, value in pairs(list or {}) do
-          table.insert(items, { label = value, kind = cmp.lsp.CompletionItemKind.Tag })
-        end
+      end
+    else
+      local _, list = pcall(function() return vim.fn.getcompletion(input, "tag") end)
+      for _, value in pairs(list or {}) do
+        table.insert(items, { label = value, kind = cmp.lsp.CompletionItemKind.Tag })
       end
     end
-    callback({ items = items, isIncomplete = true })
-  end, 100)
-end
-
-function M:resolve(completion_item, callback)
-  local cmp_ok, cmp = pcall(require, 'cmp')
-  if not cmp_ok then return callback(completion_item) end
-
-  local prefix = completion_item.data and completion_item.data.prefix
-  local docs = M.build_documentation(completion_item.label, prefix)
-  local formartDocument = util.convert_input_to_markdown_lines(docs)
-  completion_item.documentation = {
-    kind = cmp.lsp.MarkupKind.Markdown,
-    value = table.concat(formartDocument, '\n')
-  }
-  callback(completion_item)
+  end
+  callback({ items = items, isIncomplete = true })
 end
 
 function M:is_available() return true end
